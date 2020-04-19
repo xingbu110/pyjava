@@ -31,7 +31,7 @@ class LogClient(object):
             self.log_port = self.conf['spark.mlsql.log.driver.port']
             self.log_user = self.conf['PY_EXECUTE_USER']
             self.log_token = self.conf['spark.mlsql.log.driver.token']
-            self.log_group_id = self.conf['groupId']        
+            self.log_group_id = self.conf['groupId']
             import socket
             self.conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.conn.connect((self.log_host, int(self.log_port)))
@@ -54,8 +54,8 @@ class LogClient(object):
             }}, ensure_ascii=False)
         write_bytes_with_length(resp, self.outfile)
 
-    def close(self):        
-        if hasattr(self,"conn"):
+    def close(self):
+        if hasattr(self, "conn"):
             self.conn.close()
             self.conn = None
 
@@ -69,10 +69,10 @@ class PythonContext(object):
         self.conf = conf
         self.schema = ""
         self.have_fetched = False
+        self.saved_file = None
         self.log_client = LogClient(self.conf)
         if "pythonMode" in conf and conf["pythonMode"] == "ray":
             self.rayContext = RayContext(self)
-        
 
     def set_output(self, value, schema=""):
         self.output_data = value
@@ -84,12 +84,12 @@ class PythonContext(object):
         for item in items:
             buffer.append(item)
             if len(buffer) == block_size:
-                df = pd.DataFrame(buffer,columns=buffer[0].keys())
+                df = pd.DataFrame(buffer, columns=buffer[0].keys())
                 buffer.clear()
                 yield df
 
         if len(buffer) > 0:
-            df = pd.DataFrame(buffer,columns=buffer[0].keys())
+            df = pd.DataFrame(buffer, columns=buffer[0].keys())
             buffer.clear()
             yield df
 
@@ -102,6 +102,8 @@ class PythonContext(object):
 
     def __del__(self):
         self.log_client.close()
+        if self.saved_file and os.exists(self.saved_file):
+            os.remove(self.saved_file)
 
     def noops_fetch(self):
         for item in self.fetch_once():
@@ -128,13 +130,39 @@ class PythonContext(object):
         for items in self.input_data:
             yield pa.Table.from_batches([items]).to_pandas()
 
+    def fetch_as_file(self):
+        import pyarrow as pa
+        if not self.saved_file:
+            self.save_as_file()
+            for items in self.input_data:
+                yield pa.Table.from_batches([items]).to_pandas()
+        else:
+            out_ser = ArrowStreamSerializer()
+            buffer_size = int(os.environ.get("BUFFER_SIZE", 65536))
+            import pyarrow.fs as pa_fs
+            local_file_system = pa_fs.LocalFileSystem()
+            with local_file_system.open_input_stream(self.saved_file, buffer_size) as fs:
+                result = out_ser.load_stream(fs)
+                for items in result:
+                    yield pa.Table.from_batches([items]).to_pandas()
+
+    def save_as_file(self):
+        in_ser = ArrowStreamSerializer()
+        buffer_size = int(os.environ.get("BUFFER_SIZE", 65536))
+        file = str(self.conf["tempDataLocalPath"]).join('\\').join(str(uuid.uuid1()).join('.pyjava'))
+        self.saved_file = file
+        import pyarrow.fs as pa_fs
+        local_file_system = pa_fs.LocalFileSystem()
+        with local_file_system.open_output_stream(file, buffer_size) as fs:
+            in_ser.dump_stream(self.input_data, fs)
+
 
 class PythonProjectContext(object):
     def __init__(self):
         self.params_read = False
         self.conf = {}
         self.read_params_once()
-        self.log_client = LogClient(self.conf)        
+        self.log_client = LogClient(self.conf)
 
     def read_params_once(self):
         if not self.params_read:
@@ -246,8 +274,8 @@ class RayContext(object):
             server = ray.experimental.get_actor(server_info.server_id)
             buffer.append(ray.get(server.connect_info.remote()))
             server.serve.remote(func_for_row, func_for_rows)
-        items =  [vars(server) for server in buffer]
-        self.python_context.build_result(items, 1024)           
+        items = [vars(server) for server in buffer]
+        self.python_context.build_result(items, 1024)
         return buffer
 
     def foreach(self, func_for_row):
@@ -260,8 +288,8 @@ class RayContext(object):
         for shard in self.data_servers():
             for row in RayContext.fetch_once_as_rows(shard):
                 yield row
-    
-    @staticmethod  
+
+    @staticmethod
     def collect_from(servers):
         for shard in servers:
             for row in RayContext.fetch_once_as_rows(shard):
